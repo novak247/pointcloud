@@ -11,9 +11,10 @@ import open3d as o3d
 import sys
 from pathlib import Path
 import math
+import json
 
 
-DEFAULT_PLY = Path.home() / "skola"/ "pointcloud"/ "pointclouds" / "pairwise_icp_pair_0_2.ply"
+DEFAULT_PLY = Path("pointclouds/clean_back_scan.ply")
 
 def load_point_cloud(path: Path):
     pcd = o3d.io.read_point_cloud(str(path))
@@ -93,38 +94,6 @@ def make_axis_ticks(min_b, max_b, spacing, font_size, color):
             geoms.append(make_text(f"{t:.2f}".rstrip('0').rstrip('.'), p1, font_size, color, axis=ax))
     return geoms
 
-# def make_text(message, pos, font_size, color):
-#     """
-#     Returns a geometry object that shows *message* at *pos*.
-
-#     • If nightly Open3D exposes geometry.Text3D ➜ use it.
-#     • Otherwise fall back to t.geometry.TriangleMesh.create_text()
-#       and scale it so the height ≈ font_size world‑units.
-#     """
-#     if hasattr(o3d.geometry, "Text3D"):                   # dev/nightly builds
-#         txt = o3d.geometry.Text3D(text=message,
-#                                   pos=pos,
-#                                   direction=[0, 0, 1],
-#                                   degree=0.0,
-#                                   font_size=int(font_size))
-#     else:                                                 # 0.18 / 0.19 stable
-#         mesh = o3d.t.geometry.TriangleMesh.create_text(message, depth=0.001).to_legacy()
-
-#         bbox  = mesh.get_axis_aligned_bounding_box()
-#         height = bbox.get_extent()[1] or 1.0
-#         scale  = font_size / height
-
-#         mesh.scale(scale,  center=bbox.get_center())
-#         mesh.rotate(
-#             o3d.geometry.get_rotation_matrix_from_xyz((-math.pi, math.pi, math.pi)),
-#             center=mesh.get_center()
-#         )
-#         mesh.translate(pos - mesh.get_center())
-#         txt = mesh
-
-
-#     txt.paint_uniform_color(color)
-#     return txt
 
 def make_text(message, pos, height, color, axis=0, two_sided=True):
     """
@@ -156,6 +125,23 @@ def make_text(message, pos, height, color, axis=0, two_sided=True):
     return mesh
 
 
+def load_transform(json_path: Path, invert: bool = False) -> np.ndarray:
+    with open(json_path, "r") as f:
+        data = json.load(f)
+
+    if "T" not in data:
+        raise KeyError(f"'T' not found in {json_path}")
+
+    T = np.asarray(data["T"], dtype=float)
+    if T.shape != (4, 4):
+        raise ValueError(f"Transform in {json_path} must be 4x4, got {T.shape}")
+
+    if invert:
+        T = np.linalg.inv(T)
+
+    return T
+
+
 def main():
     parser = argparse.ArgumentParser(description="Visualize a .ply point cloud.")
     parser.add_argument("ply_path", type=Path, nargs="?", default=DEFAULT_PLY, help=".ply file to load")
@@ -168,25 +154,24 @@ def main():
     parser.add_argument("--save-screenshot", type=Path, default=None,
                         help="Path to save a screenshot (png) after window closes.")
     parser.add_argument("--axes",action="store_true",help="Show an XYZ coordinate frame (default size 0.2 m)")
-    parser.add_argument(
-        "--axes-size",
-        type=float,
-        default=0.2,
-        help="Size of the coordinate frame in the same units as the point cloud (default: 0.2)",
-    )
+    parser.add_argument("--axes-size",type=float,default=0.2,
+                        help="Size of the coordinate frame in the same units as the point cloud (default: 0.2)",)
     parser.add_argument("--axes-rel", action="store_true",
-                    help="Place the axes at the point-cloud centre instead of the world origin")
+                        help="Place the axes at the point-cloud centre instead of the world origin")
     parser.add_argument("--axes-scale", type=float, default=None,
                         help="Manual scale for axes; if omitted I'll auto-scale to 10 % of the cloud")
     parser.add_argument("--ticks", type=float, default=None,
-                    help="Tick spacing for axis labels. "
+                        help="Tick spacing for axis labels. "
                          "If omitted, I’ll auto‑pick ≈ 10 ticks per axis.")
     parser.add_argument("--tick-font", type=int, default=20,
                         help="Font size for tick labels (Open3D Text3D).")
     parser.add_argument("--tick-color", type=float, nargs=3, default=[0.8, 0.8, 0.8],
                         metavar=("R", "G", "B"),
                         help="RGB in [0,1] for tick lines and text (default light‑grey).")
-
+    parser.add_argument("--transform", type=Path, default=None,
+                        help="Path to a JSON file containing a 4x4 matrix under the key 'T'.")
+    parser.add_argument("--invert-transform", action="store_true",
+                        help="Invert the transform before applying (use if your T is world→sensor instead of sensor→world).")
     args = parser.parse_args()
 
     if not args.ply_path.is_file():
@@ -195,6 +180,9 @@ def main():
     print("Loading point cloud...")
     pcd = load_point_cloud(args.ply_path)
     print(pcd)
+    if args.transform is not None:
+        T = load_transform(args.transform, invert=args.invert_transform)
+        pcd.transform(T)   # rotates normals too, if present
 
     if args.voxel:
         print(f"Downsampling with voxel size {args.voxel}...")
