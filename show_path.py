@@ -1,9 +1,4 @@
 #!/usr/bin/env python
-"""
-map_and_show_path.py
-Run with:  python map_and_show_path.py scan_back.ply
-"""
-
 import numpy as np
 import open3d as o3d
 from scipy.spatial import cKDTree
