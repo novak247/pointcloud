@@ -11,7 +11,8 @@ from scipy.signal import savgol_filter
 from scipy.ndimage import gaussian_filter1d
 from scipy.interpolate import interp1d
 
-DEFAULT_PLY = Path("pointclouds/clean_back_scan.ply")
+DEFAULT_PLY = Path("pointclouds/mesh_05_alpha_25.0mm.ply")
+# DEFAULT_PLY = Path("pointclouds/clean_back_scan.ply")
 
 def extrapolate_spine_region(spine_left: np.ndarray, 
                            spine_right: np.ndarray,
@@ -169,115 +170,59 @@ def create_extended_spine_mesh(extended_left: np.ndarray,
     
     return mesh
 
-def check_spine_collision_extended(zigzag_points: np.ndarray, 
-                                 extended_spine_left: np.ndarray, 
-                                 extended_spine_right: np.ndarray,
-                                 safety_margin: float = 20.0) -> np.ndarray:
+def calculate_spine_aware_offset(extended_spine_left: np.ndarray,
+                                    extended_spine_right: np.ndarray,
+                                    min_x: float, max_x: float,
+                                    safety_margin: float = 10.0,
+                                    amplitude_factor: float = 0.15) -> float:
     """
-    Check collision with extended spine region that covers full back
+    Calculate base_offset_factor needed to avoid spine while keeping amplitude fixed
     """
+    if extended_spine_left is None or extended_spine_right is None:
+        return 0.2  # Default offset
     
-    if len(extended_spine_left) < 2 or len(extended_spine_right) < 2:
-        return np.zeros(len(zigzag_points), dtype=bool)
+    total_width = max_x - min_x
+    center_x = (min_x + max_x) / 2
+    amplitude = total_width * amplitude_factor  # Fixed amplitude
     
-    # Create interpolation functions for the extended spine
-    spine_y_coords = extended_spine_left[:, 1]
-    spine_left_x = extended_spine_left[:, 0]
-    spine_right_x = extended_spine_right[:, 0]
+    # Find spine boundaries
+    leftmost_spine = np.min(extended_spine_left[:, 0])
+    rightmost_spine = np.max(extended_spine_right[:, 0])
     
-    # Sort by Y coordinate
-    sort_indices = np.argsort(spine_y_coords)
-    spine_y_sorted = spine_y_coords[sort_indices]
-    spine_left_x_sorted = spine_left_x[sort_indices]
-    spine_right_x_sorted = spine_right_x[sort_indices]
+    print(f"Spine extends from X={leftmost_spine:.1f} to X={rightmost_spine:.1f}")
+    print(f"Center X={center_x:.1f}, Amplitude={amplitude:.1f}")
     
-    try:
-        left_interp = interp1d(spine_y_sorted, spine_left_x_sorted, 
-                              kind='linear', bounds_error=False, fill_value='extrapolate')
-        right_interp = interp1d(spine_y_sorted, spine_right_x_sorted, 
-                               kind='linear', bounds_error=False, fill_value='extrapolate')
-    except Exception as e:
-        print(f"Interpolation failed: {e}")
-        return np.zeros(len(zigzag_points), dtype=bool)
+    # Calculate required base_offset for spine avoidance:
+    # Left zigzag: (center_x - base_offset) + amplitude < leftmost_spine - safety_margin
+    # Right zigzag: (center_x + base_offset) - amplitude > rightmost_spine + safety_margin
     
-    # Check each zigzag point
-    collision_mask = np.zeros(len(zigzag_points), dtype=bool)
-    collision_count = 0
+    # From left constraint:
+    left_required_offset = center_x + amplitude - leftmost_spine - safety_margin
     
-    for i, (x, y) in enumerate(zigzag_points):
-        # Get spine boundaries at this Y coordinate (including extrapolated regions)
-        try:
-            left_boundary = left_interp(y) - safety_margin
-            right_boundary = right_interp(y) + safety_margin
-            
-            # Check if point is between boundaries (inside spine region)
-            if left_boundary <= x <= right_boundary:
-                collision_mask[i] = True
-                collision_count += 1
-        except:
-            continue  # Skip if interpolation fails for this point
+    # From right constraint: 
+    right_required_offset = rightmost_spine + safety_margin - center_x + amplitude
     
-    print(f"Collision check: {collision_count}/{len(zigzag_points)} points collide with extended spine")
-    return collision_mask
-
-def adjust_zigzag_for_extended_spine(zigzag_points: np.ndarray,
-                                   extended_spine_left: np.ndarray,
-                                   extended_spine_right: np.ndarray,
-                                   safety_margin: float = 20.0,
-                                   is_left_path: bool = True) -> np.ndarray:
-    """
-    Adjust zigzag points to avoid collision with extended spine
-    """
+    # Take the larger of the two requirements
+    spine_required_offset = max(left_required_offset, right_required_offset)
     
-    if len(extended_spine_left) < 2 or len(extended_spine_right) < 2:
-        return zigzag_points
+    # Also ensure no intersection: base_offset > amplitude
+    intersection_required_offset = amplitude + 10  # Small margin
+    print(intersection_required_offset)
     
-    # Create interpolation functions
-    spine_y_coords = extended_spine_left[:, 1]
-    spine_left_x = extended_spine_left[:, 0]
-    spine_right_x = extended_spine_right[:, 0]
+    # Take the maximum of all requirements
+    required_base_offset = max(spine_required_offset, intersection_required_offset)
     
-    sort_indices = np.argsort(spine_y_coords)
-    spine_y_sorted = spine_y_coords[sort_indices]
-    spine_left_x_sorted = spine_left_x[sort_indices]
-    spine_right_x_sorted = spine_right_x[sort_indices]
+    # Convert back to factor
+    base_offset_factor = required_base_offset / total_width
     
-    try:
-        left_interp = interp1d(spine_y_sorted, spine_left_x_sorted, 
-                              kind='linear', bounds_error=False, fill_value='extrapolate')
-        right_interp = interp1d(spine_y_sorted, spine_right_x_sorted, 
-                               kind='linear', bounds_error=False, fill_value='extrapolate')
-    except:
-        return zigzag_points
+    # Cap at reasonable maximum (don't go too close to edges)
+    max_reasonable_factor = 0.4
+    base_offset_factor = min(base_offset_factor, max_reasonable_factor)
     
-    adjusted_points = zigzag_points.copy()
-    collision_count = 0
+    print(f"Required base_offset: {required_base_offset:.1f} units")
+    print(f"Base offset factor: {base_offset_factor:.3f}")
     
-    for i, (x, y) in enumerate(zigzag_points):
-        try:
-            left_boundary = left_interp(y)
-            right_boundary = right_interp(y)
-            
-            # Check for collision and adjust
-            if is_left_path:
-                # Left path should stay left of spine
-                required_x = left_boundary - safety_margin
-                if x > required_x:  # Collision - move further left
-                    adjusted_points[i, 0] = required_x
-                    collision_count += 1
-            else:
-                # Right path should stay right of spine  
-                required_x = right_boundary + safety_margin
-                if x < required_x:  # Collision - move further right
-                    adjusted_points[i, 0] = required_x
-                    collision_count += 1
-        except:
-            continue  # Skip if interpolation fails
-    
-    if collision_count > 0:
-        print(f"Adjusted {collision_count} points in {'left' if is_left_path else 'right'} zigzag for extended spine avoidance")
-    
-    return adjusted_points
+    return base_offset_factor
 def generate_zigzag(
     min_x: float,
     max_x: float,
@@ -327,165 +272,8 @@ def generate_zigzag(
     # Combine into final point arrays
     points_left = np.column_stack((x_left, y_path))
     points_right = np.column_stack((x_right, y_path))
-
+    
     return points_left, points_right
-
-def check_spine_collision(zigzag_points: np.ndarray, 
-                         spine_left: np.ndarray, 
-                         spine_right: np.ndarray,
-                         safety_margin: float = 20.0) -> np.ndarray:
-    """
-    Check which zigzag points collide with the spine region
-    
-    Parameters:
-    - zigzag_points: (N, 2) array of (x, y) zigzag points
-    - spine_left: (M, 3) array of left spine boundary points
-    - spine_right: (M, 3) array of right spine boundary points  
-    - safety_margin: additional clearance around spine
-    
-    Returns:
-    - collision_mask: boolean array indicating which points collide
-    """
-    
-    if len(spine_left) < 2 or len(spine_right) < 2:
-        return np.zeros(len(zigzag_points), dtype=bool)
-    
-    # Create interpolation functions for spine boundaries
-    spine_y_coords = spine_left[:, 1]
-    spine_left_x = spine_left[:, 0]
-    spine_right_x = spine_right[:, 0]
-    
-    # Sort by Y coordinate for interpolation
-    sort_indices = np.argsort(spine_y_coords)
-    spine_y_sorted = spine_y_coords[sort_indices]
-    spine_left_x_sorted = spine_left_x[sort_indices]
-    spine_right_x_sorted = spine_right_x[sort_indices]
-    
-    # Create interpolation functions
-    try:
-        left_interp = interp1d(spine_y_sorted, spine_left_x_sorted, 
-                              kind='linear', bounds_error=False, fill_value='extrapolate')
-        right_interp = interp1d(spine_y_sorted, spine_right_x_sorted, 
-                               kind='linear', bounds_error=False, fill_value='extrapolate')
-    except:
-        # Fallback if interpolation fails
-        return np.zeros(len(zigzag_points), dtype=bool)
-    
-    # Check each zigzag point
-    collision_mask = np.zeros(len(zigzag_points), dtype=bool)
-    
-    for i, (x, y) in enumerate(zigzag_points):
-        # Get spine boundaries at this Y coordinate
-        left_boundary = left_interp(y) - safety_margin
-        right_boundary = right_interp(y) + safety_margin
-        
-        # Check if point is between boundaries (inside spine region)
-        if left_boundary <= x <= right_boundary:
-            collision_mask[i] = True
-    
-    return collision_mask
-
-def adjust_zigzag_for_spine_avoidance(zigzag_points: np.ndarray,
-                                    spine_left: np.ndarray,
-                                    spine_right: np.ndarray,
-                                    safety_margin: float = 20.0,
-                                    is_left_path: bool = True) -> np.ndarray:
-    """
-    Adjust zigzag points to avoid spine collision
-    
-    Parameters:
-    - zigzag_points: (N, 2) array of zigzag points
-    - spine_left/right: spine boundary points
-    - safety_margin: clearance from spine
-    - is_left_path: True for left zigzag, False for right zigzag
-    
-    Returns:
-    - adjusted_points: (N, 2) array of adjusted zigzag points
-    """
-    
-    if len(spine_left) < 2 or len(spine_right) < 2:
-        return zigzag_points
-    
-    # Create interpolation functions
-    spine_y_coords = spine_left[:, 1]
-    spine_left_x = spine_left[:, 0]
-    spine_right_x = spine_right[:, 0]
-    
-    sort_indices = np.argsort(spine_y_coords)
-    spine_y_sorted = spine_y_coords[sort_indices]
-    spine_left_x_sorted = spine_left_x[sort_indices]
-    spine_right_x_sorted = spine_right_x[sort_indices]
-    
-    try:
-        left_interp = interp1d(spine_y_sorted, spine_left_x_sorted, 
-                              kind='linear', bounds_error=False, fill_value='extrapolate')
-        right_interp = interp1d(spine_y_sorted, spine_right_x_sorted, 
-                               kind='linear', bounds_error=False, fill_value='extrapolate')
-    except:
-        return zigzag_points
-    
-    adjusted_points = zigzag_points.copy()
-    collision_count = 0
-    
-    for i, (x, y) in enumerate(zigzag_points):
-        left_boundary = left_interp(y)
-        right_boundary = right_interp(y)
-        
-        # Check for collision and adjust
-        if is_left_path:
-            # Left path should stay left of spine
-            required_x = left_boundary - safety_margin
-            if x > required_x:  # Collision - move further left
-                adjusted_points[i, 0] = required_x
-                collision_count += 1
-        else:
-            # Right path should stay right of spine  
-            required_x = right_boundary + safety_margin
-            if x < required_x:  # Collision - move further right
-                adjusted_points[i, 0] = required_x
-                collision_count += 1
-    
-    if collision_count > 0:
-        print(f"Adjusted {collision_count} points in {'left' if is_left_path else 'right'} zigzag to avoid spine")
-    
-    return adjusted_points
-
-def smooth_adjusted_zigzag(adjusted_points: np.ndarray, 
-                          original_points: np.ndarray,
-                          smoothing_factor: float = 0.3) -> np.ndarray:
-    """
-    Smooth the adjusted zigzag to maintain natural curves
-    
-    Parameters:
-    - adjusted_points: points after spine avoidance
-    - original_points: original zigzag points
-    - smoothing_factor: how much to smooth (0=no smooth, 1=full smooth)
-    
-    Returns:
-    - smoothed_points: smoothed zigzag points
-    """
-    
-    if len(adjusted_points) < 5:
-        return adjusted_points
-    
-    smoothed = adjusted_points.copy()
-    
-    # Apply smoothing filter to X coordinates only (preserve Y)
-    try:
-        window_length = min(7, len(adjusted_points) - 1)
-        if window_length >= 5 and window_length % 2 == 1:  # Must be odd
-            x_smooth = savgol_filter(adjusted_points[:, 0], 
-                                   window_length=window_length, 
-                                   polyorder=3)
-            
-            # Blend with original for natural curves
-            smoothed[:, 0] = (smoothing_factor * x_smooth + 
-                            (1 - smoothing_factor) * adjusted_points[:, 0])
-    except:
-        pass  # Keep original if smoothing fails
-    
-    return smoothed
-
 
 # ---- 2‑D → 3‑D mapping helper ----
 def map_2d_path_to_3d(pcd, path_xy, radius=3.0):
@@ -540,25 +328,6 @@ def offset_path_along_normals(pcd: o3d.geometry.PointCloud,
 
 # ========== IMPROVED FAST SPINE DETECTION ==========
 
-def smart_downsample_for_spine(points, target_size=50000):
-    """
-    Smart downsampling that preserves spine structure
-    """
-    if len(points) <= target_size:
-        return points
-    
-    # Use stratified sampling to preserve distribution
-    # Sample more densely in the center corridor where spine is likely
-    center_x = np.median(points[:, 0])
-    distances_from_center = np.abs(points[:, 0] - center_x)
-    
-    # Higher probability for points closer to center
-    probabilities = 1.0 / (1.0 + distances_from_center / np.std(distances_from_center))
-    probabilities = probabilities / probabilities.sum()
-    
-    # Sample points
-    indices = np.random.choice(len(points), size=target_size, replace=False, p=probabilities)
-    return points[indices]
 
 def create_spine_rectangle(spine_centerline, spine_width=50.0):
     """
@@ -865,7 +634,7 @@ if __name__ == "__main__":
         raise RuntimeError("Empty point cloud!")
 
     # Define bounds
-    min_x, max_x = 450, 1300
+    min_x, max_x = 500, 1250
     min_y, max_y = -200, 600
 
     # 1. DETECT SPINE REGION FIRST
@@ -901,37 +670,28 @@ if __name__ == "__main__":
                         min_x, max_x, min_y, max_y,
                         num_points=100, frequency=6)
 
-    # 4. ADJUST ZIGZAG PATHS TO AVOID EXTENDED SPINE
+    print("=== GENERATING SPINE-AWARE ZIGZAG PATHS ===")
+
     if extended_spine_left is not None and extended_spine_right is not None:
-        print("=== ADJUSTING PATHS FOR EXTENDED SPINE AVOIDANCE ===")
+        # Calculate required offset to avoid spine
+        spine_aware_offset= calculate_spine_aware_offset(
+            extended_spine_left, extended_spine_right, 
+            min_x, max_x
+        )
+        print(f"Using spine-aware base offset: {spine_aware_offset:.3f}")
         
-        # Check for collisions with extended spine
-        left_collisions = check_spine_collision_extended(
-            pts_left2d_original, extended_spine_left, extended_spine_right, args.spine_margin)
-        right_collisions = check_spine_collision_extended(
-            pts_right2d_original, extended_spine_left, extended_spine_right, args.spine_margin)
-        
-        print(f"Extended spine collision check:")
-        print(f"  Left path collisions: {np.sum(left_collisions)}/{len(left_collisions)}")
-        print(f"  Right path collisions: {np.sum(right_collisions)}/{len(right_collisions)}")
-        
-        # Adjust paths using extended spine
-        pts_left2d_adjusted = adjust_zigzag_for_extended_spine(
-            pts_left2d_original, extended_spine_left, extended_spine_right, 
-            safety_margin=args.spine_margin, is_left_path=True)
-        
-        pts_right2d_adjusted = adjust_zigzag_for_extended_spine(
-            pts_right2d_original, extended_spine_left, extended_spine_right,
-            safety_margin=args.spine_margin, is_left_path=False)
-        
-        # Smooth the adjusted paths
-        pts_left2d_final = smooth_adjusted_zigzag(pts_left2d_adjusted, pts_left2d_original)
-        pts_right2d_final = smooth_adjusted_zigzag(pts_right2d_adjusted, pts_right2d_original)
-        
+        pts_left2d_final, pts_right2d_final = generate_zigzag(
+            min_x, max_x, min_y, max_y,
+            num_points=100, 
+            base_offset_factor=spine_aware_offset,
+            frequency=6
+        )
     else:
-        print("Using original zigzag paths (no spine detected)")
-        pts_left2d_final = pts_left2d_original
-        pts_right2d_final = pts_right2d_original
+        print("No spine detected, using default zigzag")
+        pts_left2d_final, pts_right2d_final = generate_zigzag(
+            min_x, max_x, min_y, max_y,
+            num_points=100, frequency=6
+        )
 
     # 5. MAP TO 3D
     print("=== MAPPING TO 3D ===")
